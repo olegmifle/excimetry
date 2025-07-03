@@ -1,0 +1,50 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Find the autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+];
+
+$autoloaderFound = false;
+foreach ($autoloadPaths as $autoloadPath) {
+    if (file_exists($autoloadPath)) {
+        require_once $autoloadPath;
+        $autoloaderFound = true;
+        break;
+    }
+}
+
+if (!$autoloaderFound) {
+    echo "Error: Could not find autoloader. Please run 'composer install'.\n";
+    exit(1);
+}
+
+use Excimetry\CLI\ProfileCommand;
+
+// Check if the help option is specified
+if (in_array('--help', $argv) || in_array('-h', $argv)) {
+    ProfileCommand::displayUsage();
+    exit(0);
+}
+
+// Parse the command-line arguments
+$parsed = ProfileCommand::parseArgs($argv);
+$script = $parsed['script'];
+$options = $parsed['options'];
+
+// Check if a script was specified
+if ($script === null) {
+    echo "Error: No script specified.\n";
+    ProfileCommand::displayUsage();
+    exit(1);
+}
+
+// Create and run the command
+$command = new ProfileCommand($script, $options);
+$exitCode = $command->run();
+
+exit($exitCode);
