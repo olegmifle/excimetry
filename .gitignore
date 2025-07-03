@@ -3,3 +3,5 @@ composer.lock
 GUIDELINES.md
 /vendor
 /docs
+.phpunit.result.cache
+.phpunit.cache
