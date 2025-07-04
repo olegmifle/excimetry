@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    ext-excimer\
+
     && rm -rf /var/lib/apt/lists/*
 
 # Установим Composer

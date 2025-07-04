@@ -8,203 +8,178 @@ use Excimetry\Profiler\ExcimerProfiler;
 use Excimetry\Exporter\CollapsedExporter;
 use Excimetry\Exporter\SpeedscopeExporter;
 use Excimetry\Backend\FileBackend;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
 
 /**
  * Command-line tool for profiling PHP scripts.
  */
-final class ProfileCommand
+final class ProfileCommand extends Command
 {
-    /**
-     * @var string The script to profile
-     */
-    private string $script;
-    
-    /**
-     * @var array Command-line options
-     */
-    private array $options;
-    
     /**
      * @var ExcimerProfiler The profiler instance
      */
     private ExcimerProfiler $profiler;
-    
+
     /**
      * Create a new ProfileCommand instance.
-     * 
-     * @param string $script The script to profile
-     * @param array $options Command-line options
      */
-    public function __construct(string $script, array $options = [])
+    public function __construct()
     {
-        $this->script = $script;
-        $this->options = $options;
-        
-        // Create the profiler
-        $profilerOptions = [
-            'period' => $options['period'] ?? 0.01,
-            'mode' => $options['mode'] ?? 'wall',
-        ];
-        
-        $this->profiler = new ExcimerProfiler($profilerOptions);
+        parent::__construct('profile');
     }
-    
+
     /**
-     * Run the command.
-     * 
+     * Configure the command.
+     */
+    protected function configure(): void
+    {
+        $this
+            ->setDescription('Profile a PHP script')
+            ->addArgument(
+                'script',
+                InputArgument::REQUIRED,
+                'The script to profile'
+            )
+            ->addArgument(
+                'script-args',
+                InputArgument::OPTIONAL | InputArgument::IS_ARRAY,
+                'Arguments to pass to the script'
+            )
+            ->addOption(
+                'period',
+                'p',
+                InputOption::VALUE_REQUIRED,
+                'Sampling period in seconds',
+                0.01
+            )
+            ->addOption(
+                'mode',
+                'm',
+                InputOption::VALUE_REQUIRED,
+                'Profiling mode: wall or cpu',
+                'wall'
+            )
+            ->addOption(
+                'format',
+                'f',
+                InputOption::VALUE_REQUIRED,
+                'Output format: speedscope or collapsed',
+                'speedscope'
+            )
+            ->addOption(
+                'output',
+                'o',
+                InputOption::VALUE_REQUIRED,
+                'Output directory',
+                'profiles'
+            );
+    }
+
+    /**
+     * Execute the command.
+     *
+     * @param InputInterface $input The input interface
+     * @param OutputInterface $output The output interface
      * @return int The exit code
      */
-    public function run(): int
+    protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        $script = $input->getArgument('script');
+        $scriptArgs = $input->getArgument('script-args');
+
         // Check if the script exists
-        if (!file_exists($this->script)) {
-            echo "Error: Script not found: {$this->script}\n";
-            return 1;
+        if (!file_exists($script)) {
+            $output->writeln("<error>Error: Script not found: {$script}</error>");
+            return Command::FAILURE;
         }
-        
+
+        // Create the profiler
+        $profilerOptions = [
+            'period' => (float)$input->getOption('period'),
+            'mode' => $input->getOption('mode'),
+        ];
+
+        $this->profiler = new ExcimerProfiler($profilerOptions);
+
         // Start the profiler
         $this->profiler->start();
-        
+
         // Run the script
-        $exitCode = $this->runScript();
-        
+        $exitCode = $this->runScript($script, $scriptArgs);
+
         // Stop the profiler
         $this->profiler->stop();
-        
+
         // Get the profile
         $log = $this->profiler->getLog();
-        
+
         // Save the profile
-        $this->saveProfile($log);
-        
-        return $exitCode;
+        $this->saveProfile($log, $input, $output);
+
+        return $exitCode === 0 ? Command::SUCCESS : Command::FAILURE;
     }
-    
+
     /**
      * Run the script.
      * 
+     * @param string $script The script to run
+     * @param array $args Arguments to pass to the script
      * @return int The exit code
      */
-    private function runScript(): int
+    private function runScript(string $script, array $args = []): int
     {
         // Build the command
-        $command = escapeshellcmd(PHP_BINARY) . ' ' . escapeshellarg($this->script);
-        
+        $command = escapeshellcmd(PHP_BINARY) . ' ' . escapeshellarg($script);
+
         // Add any arguments
-        if (isset($this->options['args'])) {
-            $command .= ' ' . $this->options['args'];
+        if (!empty($args)) {
+            $command .= ' ' . implode(' ', array_map('escapeshellarg', $args));
         }
-        
+
         // Run the command
         $exitCode = 0;
         passthru($command, $exitCode);
-        
+
         return $exitCode;
     }
-    
+
     /**
      * Save the profile.
      * 
      * @param mixed $log The profile log
+     * @param InputInterface $input The input interface
+     * @param OutputInterface $output The output interface
      * @return void
      */
-    private function saveProfile(mixed $log): void
+    private function saveProfile(mixed $log, InputInterface $input, OutputInterface $output): void
     {
         // Determine the format
-        $format = $this->options['format'] ?? 'speedscope';
-        
+        $format = $input->getOption('format');
+
         // Create the exporter
         $exporter = match ($format) {
             'collapsed' => new CollapsedExporter(),
             'speedscope' => new SpeedscopeExporter(),
             default => new SpeedscopeExporter(),
         };
-        
+
         // Determine the output directory
-        $outputDir = $this->options['output'] ?? 'profiles';
-        
+        $outputDir = $input->getOption('output');
+
         // Create the backend
         $backend = new FileBackend($exporter, $outputDir);
-        
+
         // Send the profile
         $result = $backend->send($log);
-        
+
         if ($result) {
-            echo "Profile saved to {$outputDir}\n";
+            $output->writeln("<info>Profile saved to {$outputDir}</info>");
         } else {
-            echo "Error: Failed to save profile\n";
+            $output->writeln("<error>Error: Failed to save profile</error>");
         }
-    }
-    
-    /**
-     * Parse command-line arguments.
-     * 
-     * @param array $argv Command-line arguments
-     * @return array Parsed options
-     */
-    public static function parseArgs(array $argv): array
-    {
-        $script = null;
-        $options = [];
-        
-        // Skip the first argument (the command name)
-        array_shift($argv);
-        
-        // Parse the arguments
-        $i = 0;
-        while ($i < count($argv)) {
-            $arg = $argv[$i];
-            
-            if (strpos($arg, '--') === 0) {
-                // Option
-                $option = substr($arg, 2);
-                $value = true;
-                
-                // Check if the option has a value
-                if (strpos($option, '=') !== false) {
-                    [$option, $value] = explode('=', $option, 2);
-                } elseif ($i + 1 < count($argv) && strpos($argv[$i + 1], '--') !== 0) {
-                    // The next argument is the value
-                    $value = $argv[$i + 1];
-                    $i++;
-                }
-                
-                $options[$option] = $value;
-            } else {
-                // Script
-                $script = $arg;
-                
-                // Any remaining arguments are passed to the script
-                $i++;
-                if ($i < count($argv)) {
-                    $options['args'] = implode(' ', array_slice($argv, $i));
-                    break;
-                }
-            }
-            
-            $i++;
-        }
-        
-        return [
-            'script' => $script,
-            'options' => $options,
-        ];
-    }
-    
-    /**
-     * Display usage information.
-     * 
-     * @return void
-     */
-    public static function displayUsage(): void
-    {
-        echo "Usage: excimetry-profile [options] <script> [script-args]\n";
-        echo "\n";
-        echo "Options:\n";
-        echo "  --period=<seconds>   Sampling period in seconds (default: 0.01)\n";
-        echo "  --mode=<mode>        Profiling mode: wall or cpu (default: wall)\n";
-        echo "  --format=<format>    Output format: speedscope or collapsed (default: speedscope)\n";
-        echo "  --output=<dir>       Output directory (default: profiles)\n";
-        echo "  --help               Display this help message\n";
     }
 }

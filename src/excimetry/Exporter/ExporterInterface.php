@@ -24,7 +24,7 @@ interface ExporterInterface
     
     /**
      * Get the content type of the exported data.
-     * 
+     * TODO: move content type definition from exporters to backend
      * @return string The content type (e.g., 'text/plain', 'application/json')
      */
     public function getContentType(): string;

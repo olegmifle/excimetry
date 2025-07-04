@@ -51,52 +51,104 @@ final class OTLPExporter implements ExporterInterface
         $parsedLog = $log->getParsedLog();
         $metadata = $log->getMetadata();
 
-        // Build the OTLP data structure
-        $otlpData = [
-            'resourceSpans' => [
-                [
-                    'resource' => [
-                        'attributes' => [
-                            [
-                                'key' => 'service.name',
-                                'value' => [
-                                    'stringValue' => $this->serviceName,
+        if ($this->format === 'json') {
+            // Build the OTLP data structure for JSON format
+            $otlpData = [
+                'resourceSpans' => [
+                    [
+                        'resource' => [
+                            'attributes' => [
+                                [
+                                    'key' => 'service.name',
+                                    'value' => [
+                                        'stringValue' => $this->serviceName,
+                                    ],
                                 ],
                             ],
                         ],
-                    ],
-                    'scopeSpans' => [
-                        [
-                            'scope' => [
-                                'name' => 'excimetry',
-                                'version' => '1.0.0',
+                        'scopeSpans' => [
+                            [
+                                'scope' => [
+                                    'name' => 'excimetry',
+                                    'version' => '1.0.0',
+                                ],
+                                'spans' => $this->convertToMetrics($parsedLog, $metadata),
                             ],
-                            'spans' => $this->convertToSpans($parsedLog, $metadata),
                         ],
                     ],
                 ],
-            ],
-        ];
+            ];
 
-        // Add metadata as resource attributes
-        foreach ($metadata as $key => $value) {
-            if (is_scalar($value)) {
-                $otlpData['resourceSpans'][0]['resource']['attributes'][] = [
-                    'key' => "excimetry.{$key}",
-                    'value' => [
-                        'stringValue' => (string)$value,
-                    ],
-                ];
+            // Add metadata as resource attributes
+            foreach ($metadata as $key => $value) {
+                if (is_scalar($value)) {
+                    $otlpData['resourceSpans'][0]['resource']['attributes'][] = [
+                        'key' => "excimetry.{$key}",
+                        'value' => [
+                            'stringValue' => (string)$value,
+                        ],
+                    ];
+                }
             }
-        }
 
-        // Convert to the requested format
-        if ($this->format === 'json') {
             return json_encode($otlpData, JSON_PRETTY_PRINT);
         } else {
-            // Protobuf serialization would be implemented here
-            // For now, we'll just return JSON as a placeholder
-            return json_encode($otlpData, JSON_PRETTY_PRINT);
+            // Protobuf serialization
+            // Create the request object
+            $request = new \Opentelemetry\Proto\Collector\Metrics\V1\ExportMetricsServiceRequest();
+
+            // Create the resource metrics
+            $resourceMetrics = new \Opentelemetry\Proto\Metrics\V1\ResourceMetrics();
+
+            // Create the resource
+            $resource = new \Opentelemetry\Proto\Resource\V1\Resource();
+
+            // Add service.name attribute
+            $serviceNameKv = new \Opentelemetry\Proto\Common\V1\KeyValue();
+            $serviceNameKv->setKey('service.name');
+            $serviceNameValue = new \Opentelemetry\Proto\Common\V1\AnyValue();
+            $serviceNameValue->setStringValue($this->serviceName);
+            $serviceNameKv->setValue($serviceNameValue);
+            $resource->setAttributes([$serviceNameKv]);
+
+            // Add metadata as resource attributes
+            $attributes = [$serviceNameKv];
+            foreach ($metadata as $key => $value) {
+                if (is_scalar($value)) {
+                    $kv = new \Opentelemetry\Proto\Common\V1\KeyValue();
+                    $kv->setKey("excimetry.{$key}");
+                    $anyValue = new \Opentelemetry\Proto\Common\V1\AnyValue();
+                    $anyValue->setStringValue((string)$value);
+                    $kv->setValue($anyValue);
+                    $attributes[] = $kv;
+                }
+            }
+            $resource->setAttributes($attributes);
+
+            // Set the resource on the resource metrics
+            $resourceMetrics->setResource($resource);
+
+            // Create the scope metrics
+            $scopeMetrics = new \Opentelemetry\Proto\Metrics\V1\ScopeMetrics();
+
+            // Create the instrumentation scope
+            $scope = new \Opentelemetry\Proto\Common\V1\InstrumentationScope();
+            $scope->setName('excimetry');
+            $scope->setVersion('1.0.0');
+            $scopeMetrics->setScope($scope);
+
+            // Convert parsed log to metrics
+            $metrics = $this->convertToPbMetrics($parsedLog, $metadata);
+            $scopeMetrics->setMetrics($metrics);
+
+            // Add the scope metrics to the resource metrics
+            $resourceMetrics->setScopeMetrics([$scopeMetrics]);
+
+            // Add the resource metrics to the request
+            $request->setResourceMetrics([$resourceMetrics]);
+
+            // Serialize the request to binary data
+            return $request->serializeToString();
         }
     }
 
@@ -187,9 +239,9 @@ final class OTLPExporter implements ExporterInterface
      * @param array $metadata The metadata
      * @return array The OTLP spans
      */
-    private function convertToSpans(array $parsedLog, array $metadata): array
+    private function convertToMetrics(array $parsedLog, array $metadata): array
     {
-        $spans = [];
+        $metrics = [];
         $startTime = $metadata['timestamp'] ?? time();
         $startTimeNanos = $startTime * 1_000_000_000;
 
@@ -201,7 +253,7 @@ final class OTLPExporter implements ExporterInterface
             $spanName = end($frames);
 
             // Create a span for each stack trace
-            $spans[] = [
+            $metrics[] = [
                 'name' => $spanName,
                 'startTimeUnixNano' => $startTimeNanos,
                 'endTimeUnixNano' => $startTimeNanos + ($count * 1_000_000), // Assuming 1ms per sample
@@ -222,6 +274,68 @@ final class OTLPExporter implements ExporterInterface
             ];
         }
 
-        return $spans;
+        return $metrics;
+    }
+
+    /**
+     * Convert parsed log data to protobuf Metric objects.
+     * 
+     * @param array $parsedLog The parsed log data
+     * @param array $metadata The metadata
+     * @return array The protobuf Metric objects
+     */
+    private function convertToPbMetrics(array $parsedLog, array $metadata): array
+    {
+        $metrics = [];
+        $startTime = $metadata['timestamp'] ?? time();
+        $startTimeNanos = $startTime * 1_000_000_000;
+
+        foreach ($parsedLog as $entry) {
+            $frames = $entry['frames'];
+            $count = $entry['count'];
+
+            // Use the last frame (leaf) as the metric name
+            $metricName = end($frames);
+
+            // Create a metric for each stack trace
+            $metric = new \Opentelemetry\Proto\Metrics\V1\Metric();
+            $metric->setName($metricName);
+            $metric->setDescription('Excimetry profile metric');
+            $metric->setUnit('count');
+
+            // Create a gauge for the metric
+            $gauge = new \Opentelemetry\Proto\Metrics\V1\Gauge();
+
+            // Create a data point for the gauge
+            $dataPoint = new \Opentelemetry\Proto\Metrics\V1\NumberDataPoint();
+            $dataPoint->setTimeUnixNano($startTimeNanos + ($count * 1_000_000)); // Assuming 1ms per sample
+            $dataPoint->setStartTimeUnixNano($startTimeNanos);
+            $dataPoint->setAsInt($count);
+
+            // Add attributes to the data point
+            $stackTraceKv = new \Opentelemetry\Proto\Common\V1\KeyValue();
+            $stackTraceKv->setKey('excimetry.stack_trace');
+            $stackTraceValue = new \Opentelemetry\Proto\Common\V1\AnyValue();
+            $stackTraceValue->setStringValue(implode(';', $frames));
+            $stackTraceKv->setValue($stackTraceValue);
+
+            $sampleCountKv = new \Opentelemetry\Proto\Common\V1\KeyValue();
+            $sampleCountKv->setKey('excimetry.sample_count');
+            $sampleCountValue = new \Opentelemetry\Proto\Common\V1\AnyValue();
+            $sampleCountValue->setIntValue($count);
+            $sampleCountKv->setValue($sampleCountValue);
+
+            $dataPoint->setAttributes([$stackTraceKv, $sampleCountKv]);
+
+            // Add the data point to the gauge
+            $gauge->setDataPoints([$dataPoint]);
+
+            // Set the gauge on the metric
+            $metric->setGauge($gauge);
+
+            $metrics[] = $metric;
+        }
+
+        return $metrics;
     }
 }

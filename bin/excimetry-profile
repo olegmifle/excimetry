@@ -24,27 +24,18 @@ if (!$autoloaderFound) {
 }
 
 use Excimetry\CLI\ProfileCommand;
+use Symfony\Component\Console\Application;
 
-// Check if the help option is specified
-if (in_array('--help', $argv) || in_array('-h', $argv)) {
-    ProfileCommand::displayUsage();
-    exit(0);
-}
+// Create the application
+$application = new Application('Excimetry', '1.0.0');
 
-// Parse the command-line arguments
-$parsed = ProfileCommand::parseArgs($argv);
-$script = $parsed['script'];
-$options = $parsed['options'];
+// Add the profile command
+$application->add(new ProfileCommand());
 
-// Check if a script was specified
-if ($script === null) {
-    echo "Error: No script specified.\n";
-    ProfileCommand::displayUsage();
-    exit(1);
-}
+// Set the profile command as the default command
+$application->setDefaultCommand('profile', true);
 
-// Create and run the command
-$command = new ProfileCommand($script, $options);
-$exitCode = $command->run();
+// Run the application
+$exitCode = $application->run();
 
 exit($exitCode);

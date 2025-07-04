@@ -6,12 +6,19 @@ namespace Excimetry\Backend;
 
 use Excimetry\Profiler\ExcimerLog;
 use Excimetry\Exporter\ExporterInterface;
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\RequestOptions;
 
 /**
  * Backend for sending profile data to a remote server via HTTP.
  */
 class HttpBackend extends AbstractBackend
 {
+    /**
+     * @var Client The Guzzle HTTP client
+     */
+    protected Client $client;
     /**
      * @var string The URL to send the data to
      */
@@ -43,6 +50,10 @@ class HttpBackend extends AbstractBackend
 
         $this->url = $url;
         $this->headers = $headers;
+        $this->client = new Client([
+            'timeout' => $this->timeout,
+            'headers' => $this->headers,
+        ]);
     }
 
     /**
@@ -67,45 +78,31 @@ class HttpBackend extends AbstractBackend
         // Export the data
         $data = $this->exporter->export($log);
 
-        // Set up the request
-        $ch = curl_init($this->url);
+        // Prepare headers
+        $headers = [
+            'Content-Type' => $this->exporter->getContentType(),
+        ];
 
-        // Set the headers
-        $headers = array_merge([
-            'Content-Type: ' . $this->exporter->getContentType(),
-            'Content-Length: ' . strlen($data),
-        ], $this->headers);
+        try {
+            // Execute the request using Guzzle
+            $response = $this->client->post($this->url, [
+                RequestOptions::BODY => $data,
+                RequestOptions::HEADERS => $headers,
+                RequestOptions::TIMEOUT => $this->timeout,
+            ]);
 
-        // Set the options
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $data,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $this->timeout,
-        ]);
+            // Check the status code
+            $statusCode = $response->getStatusCode();
+            if ($statusCode < 200 || $statusCode >= 300) {
+                error_log("HTTP request failed with status code {$statusCode}: {$response->getBody()}");
+                return false;
+            }
 
-        // Execute the request
-        $response = curl_exec($ch);
-        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-
-        // Close the connection
-        curl_close($ch);
-
-        // Check for errors
-        if ($response === false) {
-            error_log("HTTP request failed: {$error}");
+            return true;
+        } catch (GuzzleException $e) {
+            error_log("HTTP request failed: {$e->getMessage()}");
             return false;
         }
-
-        // Check the status code
-        if ($statusCode < 200 || $statusCode >= 300) {
-            error_log("HTTP request failed with status code {$statusCode}: {$response}");
-            return false;
-        }
-
-        return true;
     }
 
     /**
@@ -118,50 +115,29 @@ class HttpBackend extends AbstractBackend
         // Export the data
         $data = $this->exporter->export($log);
 
-        // Build the command
-        $command = $this->buildCurlCommand($data);
+        // Prepare headers
+        $headers = [
+            'Content-Type' => $this->exporter->getContentType(),
+        ];
 
-        // Execute the command in the background
-        $this->executeInBackground($command);
-    }
-
-    /**
-     * Build the curl command for sending the data.
-     * 
-     * @param string $data The data to send
-     * @return string The curl command
-     */
-    private function buildCurlCommand(string $data): string
-    {
-        // Escape the data for the shell
-        $escapedData = escapeshellarg($data);
-
-        // Build the headers
-        $headers = array_merge([
-            'Content-Type: ' . $this->exporter->getContentType(),
-        ], $this->headers);
-
-        $headerArgs = '';
-        foreach ($headers as $header) {
-            $headerArgs .= ' -H ' . escapeshellarg($header);
-        }
-
-        // Build the command
-        return "curl -X POST{$headerArgs} -d {$escapedData} " . escapeshellarg($this->url);
-    }
-
-    /**
-     * Execute a command in the background.
-     * 
-     * @param string $command The command to execute
-     */
-    private function executeInBackground(string $command): void
-    {
-        if (PHP_OS_FAMILY === 'Windows') {
-            pclose(popen("start /B {$command} >NUL 2>NUL", 'r'));
-        } else {
-            exec("{$command} >/dev/null 2>&1 &");
-        }
+        // Send the request asynchronously
+        $this->client->postAsync($this->url, [
+            RequestOptions::BODY => $data,
+            RequestOptions::HEADERS => $headers,
+            RequestOptions::TIMEOUT => $this->timeout,
+        ])->then(
+            function ($response) {
+                // Request succeeded
+                $statusCode = $response->getStatusCode();
+                if ($statusCode < 200 || $statusCode >= 300) {
+                    error_log("Async HTTP request failed with status code {$statusCode}: {$response->getBody()}");
+                }
+            },
+            function ($exception) {
+                // Request failed
+                error_log("Async HTTP request failed: {$exception->getMessage()}");
+            }
+        );
     }
 
     /**
@@ -169,18 +145,16 @@ class HttpBackend extends AbstractBackend
      */
     public function isAvailable(): bool
     {
-        // Check if the URL is reachable
-        $ch = curl_init($this->url);
+        try {
+            // Check if the URL is reachable using Guzzle
+            $response = $this->client->head($this->url, [
+                RequestOptions::TIMEOUT => 5,
+            ]);
 
-        curl_setopt_array($ch, [
-            CURLOPT_NOBODY => true,
-            CURLOPT_TIMEOUT => 5,
-        ]);
-
-        $result = curl_exec($ch);
-        curl_close($ch);
-
-        return $result !== false;
+            return $response->getStatusCode() >= 200 && $response->getStatusCode() < 300;
+        } catch (GuzzleException $e) {
+            return false;
+        }
     }
 
     /**
@@ -192,6 +166,11 @@ class HttpBackend extends AbstractBackend
     public function setUrl(string $url): self
     {
         $this->url = $url;
+        // Recreate the client with the new URL
+        $this->client = new Client([
+            'timeout' => $this->timeout,
+            'headers' => $this->headers,
+        ]);
         return $this;
     }
 
@@ -214,6 +193,11 @@ class HttpBackend extends AbstractBackend
     public function setHeaders(array $headers): self
     {
         $this->headers = $headers;
+        // Update the client's headers
+        $this->client = new Client([
+            'timeout' => $this->timeout,
+            'headers' => $this->headers,
+        ]);
         return $this;
     }
 
@@ -236,6 +220,11 @@ class HttpBackend extends AbstractBackend
     public function setTimeout(int $timeout): self
     {
         $this->timeout = $timeout;
+        // Update the client's timeout setting
+        $this->client = new Client([
+            'timeout' => $this->timeout,
+            'headers' => $this->headers,
+        ]);
         return $this;
     }
 

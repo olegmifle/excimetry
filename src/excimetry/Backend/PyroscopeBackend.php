@@ -7,6 +7,8 @@ namespace Excimetry\Backend;
 use Excimetry\Profiler\ExcimerLog;
 use Excimetry\Exporter\CollapsedExporter;
 use Excimetry\Exporter\ExporterInterface;
+use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\RequestOptions;
 
 /**
  * Backend for sending profile data to Pyroscope.
@@ -17,12 +19,12 @@ final class PyroscopeBackend extends HttpBackend
      * @var string The application name to use in Pyroscope
      */
     private string $appName;
-    
+
     /**
      * @var array Labels to include with the profile
      */
     private array $labels = [];
-    
+
     /**
      * Create a new PyroscopeBackend instance.
      * 
@@ -41,16 +43,16 @@ final class PyroscopeBackend extends HttpBackend
         if ($exporter === null) {
             $exporter = new CollapsedExporter();
         }
-        
+
         // Build the ingest URL
         $url = rtrim($serverUrl, '/') . '/ingest';
-        
+
         parent::__construct($exporter, $url);
-        
+
         $this->appName = $appName;
         $this->labels = $labels;
     }
-    
+
     /**
      * {@inheritdoc}
      */
@@ -58,14 +60,14 @@ final class PyroscopeBackend extends HttpBackend
     {
         // Export the data
         $data = $this->getExporter()->export($log);
-        
+
         // Build the query parameters
         $params = [
             'name' => $this->appName,
             'from' => $log->getMetadata()['timestamp'] ?? time(),
             'until' => time(),
         ];
-        
+
         // Add labels
         if (!empty($this->labels)) {
             $labelString = '';
@@ -77,51 +79,94 @@ final class PyroscopeBackend extends HttpBackend
             }
             $params['labels'] = $labelString;
         }
-        
+
         // Build the URL with query parameters
         $url = $this->getUrl() . '?' . http_build_query($params);
-        
-        // Set up the request
-        $ch = curl_init($url);
-        
-        // Set the headers
-        $headers = array_merge([
-            'Content-Type: text/plain',
-            'Content-Length: ' . strlen($data),
-        ], $this->getHeaders());
-        
-        // Set the options
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $data,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $this->getTimeout(),
-        ]);
-        
-        // Execute the request
-        $response = curl_exec($ch);
-        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        
-        // Close the connection
-        curl_close($ch);
-        
-        // Check for errors
-        if ($response === false) {
-            error_log("Pyroscope request failed: {$error}");
+
+        // Prepare headers
+        $headers = [
+            'Content-Type' => $this->getExporter()->getContentType(),
+        ];
+
+        try {
+            // Execute the request using Guzzle
+            $response = $this->client->post($url, [
+                RequestOptions::BODY => $data,
+                RequestOptions::HEADERS => $headers,
+                RequestOptions::TIMEOUT => $this->getTimeout(),
+            ]);
+
+            // Check the status code
+            $statusCode = $response->getStatusCode();
+            if ($statusCode < 200 || $statusCode >= 300) {
+                error_log("Pyroscope request failed with status code {$statusCode}: {$response->getBody()}");
+                return false;
+            }
+
+            return true;
+        } catch (GuzzleException $e) {
+            error_log("Pyroscope request failed: {$e->getMessage()}");
             return false;
         }
-        
-        // Check the status code
-        if ($statusCode < 200 || $statusCode >= 300) {
-            error_log("Pyroscope request failed with status code {$statusCode}: {$response}");
-            return false;
-        }
-        
-        return true;
     }
-    
+
+    /**
+     * Send the profile data asynchronously.
+     * 
+     * @param ExcimerLog $log The profile data to send
+     */
+    protected function sendAsync(ExcimerLog $log): void
+    {
+        // Export the data
+        $data = $this->getExporter()->export($log);
+
+        // Build the query parameters
+        $params = [
+            'name' => $this->appName,
+            'from' => $log->getMetadata()['timestamp'] ?? time(),
+            'until' => time(),
+        ];
+
+        // Add labels
+        if (!empty($this->labels)) {
+            $labelString = '';
+            foreach ($this->labels as $key => $value) {
+                if (!empty($labelString)) {
+                    $labelString .= ',';
+                }
+                $labelString .= "{$key}={$value}";
+            }
+            $params['labels'] = $labelString;
+        }
+
+        // Build the URL with query parameters
+        $url = $this->getUrl() . '?' . http_build_query($params);
+
+        // Prepare headers
+        $headers = [
+            'Content-Type' => $this->getExporter()->getContentType(),
+        ];
+
+        // Send the request asynchronously
+        $this->client->postAsync($url, [
+            RequestOptions::BODY => $data,
+            RequestOptions::HEADERS => $headers,
+            RequestOptions::TIMEOUT => $this->getTimeout(),
+        ])->then(
+            function ($response) {
+                // Request succeeded
+                $statusCode = $response->getStatusCode();
+                if ($statusCode < 200 || $statusCode >= 300) {
+                    error_log("Async Pyroscope request failed with status code {$statusCode}: {$response->getBody()}");
+                }
+            },
+            function ($exception) {
+                // Request failed
+                error_log("Async Pyroscope request failed: {$exception->getMessage()}");
+            }
+        );
+    }
+
     /**
      * Set the application name to use in Pyroscope.
      * 
@@ -133,7 +178,7 @@ final class PyroscopeBackend extends HttpBackend
         $this->appName = $appName;
         return $this;
     }
-    
+
     /**
      * Get the application name to use in Pyroscope.
      * 
@@ -143,7 +188,7 @@ final class PyroscopeBackend extends HttpBackend
     {
         return $this->appName;
     }
-    
+
     /**
      * Set the labels to include with the profile.
      * 
@@ -155,7 +200,7 @@ final class PyroscopeBackend extends HttpBackend
         $this->labels = $labels;
         return $this;
     }
-    
+
     /**
      * Get the labels to include with the profile.
      * 
@@ -165,7 +210,7 @@ final class PyroscopeBackend extends HttpBackend
     {
         return $this->labels;
     }
-    
+
     /**
      * Add a label to include with the profile.
      * 
